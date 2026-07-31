@@ -52,7 +52,7 @@ jobs:
           path: build/tests/unit/test-results.xml
 
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2019
     timeout-minutes: 20
     env:
       VERBOSE: 1
