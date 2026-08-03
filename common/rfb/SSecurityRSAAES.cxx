@@ -1,5 +1,6 @@
-/* Copyright (C) 2022 Dinglan Peng
- * 
+/* 
+ * Copyright (C) 2022 Dinglan Peng
+ *    
  * This is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
@@ -21,42 +22,32 @@
 #endif
 
 #ifndef HAVE_NETTLE
-#error "This source should not be compiled without HAVE_NETTLE defined"
+#error "This header should not be compiled without HAVE_NETTLE defined"
 #endif
 
-#include <errno.h>
-#include <stdio.h>
 #include <stdlib.h>
+#ifndef WIN32
+#include <unistd.h>
+#endif
 #include <assert.h>
-
-#include <vector>
 
 #include <nettle/bignum.h>
 #include <nettle/sha1.h>
 #include <nettle/sha2.h>
-#include <nettle/base64.h>
-#include <nettle/asn1.h>
 
-#include <core/Exception.h>
 #include <core/LogWriter.h>
-
-#include <rdr/AESInStream.h>
-#include <rdr/AESOutStream.h>
-#include <rdr/RandomStream.h>
+#include <core/string.h>
 
 #include <rfb/SSecurityRSAAES.h>
 #include <rfb/SConnection.h>
 #include <rfb/Exception.h>
-#if !defined(WIN32) && !defined(__APPLE__)
-#include <rfb/UnixPasswordValidator.h>
-#endif
-#ifdef WIN32
-#include <rfb/WinPasswdValidator.h>
-#endif
-#include <rfb/SSecurityVncAuth.h>
+
+#include <rdr/AESInStream.h>
+#include <rdr/AESOutStream.h>
+#include <rdr/MemOutStream.h>
+#include <rdr/RandomStream.h>
 
 enum {
-  SendPublicKey,
   ReadPublicKey,
   ReadRandom,
   ReadHash,
@@ -65,27 +56,18 @@ enum {
 
 const int MinKeyLength = 1024;
 const int MaxKeyLength = 8192;
-const size_t MaxKeyFileSize = 32 * 1024;
 
 using namespace rfb;
-
-core::StringParameter SSecurityRSAAES::keyFile
-("RSAKey", "Path to the RSA key for the RSA-AES security types in "
-           "PEM format", "");
-core::BoolParameter SSecurityRSAAES::requireUsername
-("RequireUsername", "Require username for the RSA-AES security types",
- false);
 
 static core::LogWriter vlog("SSecurityRSAAES");
 
 SSecurityRSAAES::SSecurityRSAAES(SConnection* sc_, uint32_t _secType,
                                  int _keySize, bool _isAllEncrypted)
-  : SSecurity(sc_), state(SendPublicKey),
+  : SSecurity(sc_), state(ReadPublicKey),
     keySize(_keySize), isAllEncrypted(_isAllEncrypted), secType(_secType),
-    serverKey(), clientKey(),
-    serverKeyN(nullptr), serverKeyE(nullptr),
+    serverKey(), serverPublicKey(), clientKey(),
     clientKeyN(nullptr), clientKeyE(nullptr),
-    accessRights(AccessDefault),
+    serverKeyN(nullptr), serverKeyE(nullptr),
     rais(nullptr), raos(nullptr), rawis(nullptr), rawos(nullptr)
 {
   assert(keySize == 128 || keySize == 256);
@@ -121,6 +103,8 @@ void SSecurityRSAAES::cleanup()
     delete[] clientKeyE;
   if (serverKey.size)
     rsa_private_key_clear(&serverKey);
+  if (serverPublicKey.size)
+    rsa_public_key_clear(&serverPublicKey);
   if (clientKey.size)
     rsa_public_key_clear(&clientKey);
   if (isAllEncrypted && rawis && rawos)
@@ -131,157 +115,23 @@ void SSecurityRSAAES::cleanup()
     delete raos;
 }
 
-static inline ssize_t findSubstr(uint8_t* data, size_t size, const char *pattern)
-{
-  size_t patternLength = strlen(pattern);
-  for (size_t i = 0; i + patternLength < size; ++i) {
-    for (size_t j = 0; j < patternLength; ++j)
-      if (data[i + j] != pattern[j])
-        goto next;
-    return i;
-next:
-    continue;
-  }
-  return -1;
-}
-
-static bool loadPEM(uint8_t* data, size_t size, const char *begin,
-                    const char *end, std::vector<uint8_t> *der)
-{
-  ssize_t pos1 = findSubstr(data, size, begin);
-  if (pos1 == -1)
-    return false;
-  pos1 += strlen(begin);
-  ssize_t base64Size = findSubstr(data + pos1, size - pos1, end);
-  if (base64Size == -1)
-    return false;
-  char *derBase64 = (char *)data + pos1;
-  if (!base64Size)
-    return false;
-  der->resize(BASE64_DECODE_LENGTH(base64Size));
-  struct base64_decode_ctx ctx;
-  size_t derSize;
-  base64_decode_init(&ctx);
-  if (!base64_decode_update(&ctx, &derSize, der->data(),
-                            base64Size, derBase64))
-    return false;
-  if (!base64_decode_final(&ctx))
-    return false;
-  assert(derSize <= der->size());
-  der->resize(derSize);
-  return true;
-}
-
-void SSecurityRSAAES::loadPrivateKey()
-{
-  FILE* file = fopen(keyFile, "rb");
-  if (!file)
-    throw core::posix_error("Failed to open key file", errno);
-  fseek(file, 0, SEEK_END);
-  size_t size = ftell(file);
-  if (size == 0 || size > MaxKeyFileSize) {
-    fclose(file);
-    throw std::runtime_error("Size of key file is zero or too big");
-  }
-  fseek(file, 0, SEEK_SET);
-  std::vector<uint8_t> data(size);
-  if (fread(data.data(), 1, data.size(), file) != size) {
-    fclose(file);
-    throw core::posix_error("Failed to read key", errno);
-  }
-  fclose(file);
-
-  std::vector<uint8_t> der;
-  if (loadPEM(data.data(), data.size(),
-              "-----BEGIN RSA PRIVATE KEY-----\n",
-              "-----END RSA PRIVATE KEY-----", &der)) {
-    loadPKCS1Key(der.data(), der.size());
-    return;
-  }
-  if (loadPEM(data.data(), data.size(),
-              "-----BEGIN PRIVATE KEY-----\n",
-              "-----END PRIVATE KEY-----", &der)) {
-    loadPKCS8Key(der.data(), der.size());
-    return;
-  }
-  throw std::runtime_error("Failed to import key");
-}
-
-void SSecurityRSAAES::loadPKCS1Key(const uint8_t* data, size_t size)
-{
-  struct rsa_public_key pub;
-  rsa_private_key_init(&serverKey);
-  rsa_public_key_init(&pub);
-  if (!rsa_keypair_from_der(&pub, &serverKey, 0, size, data)) {
-    rsa_private_key_clear(&serverKey);
-    rsa_public_key_clear(&pub);
-    throw std::runtime_error("Failed to import key");
-  }
-  serverKeyLength = serverKey.size * 8;
-  serverKeyN = new uint8_t[serverKey.size];
-  serverKeyE = new uint8_t[serverKey.size];
-  nettle_mpz_get_str_256(serverKey.size, serverKeyN, pub.n);
-  nettle_mpz_get_str_256(serverKey.size, serverKeyE, pub.e);
-  rsa_public_key_clear(&pub);
-}
-
-void SSecurityRSAAES::loadPKCS8Key(const uint8_t* data, size_t size)
-{
-  struct asn1_der_iterator i, j;
-  uint32_t version;
-  const char* rsaIdentifier = "\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01";
-  const size_t rsaIdentifierLength = 9;
-  enum asn1_iterator_result res = asn1_der_iterator_first(&i, size, data);
-  if (res != ASN1_ITERATOR_CONSTRUCTED)
-    goto failed;
-  if (i.type != ASN1_SEQUENCE)
-    goto failed;
-  if (asn1_der_decode_constructed_last(&i) != ASN1_ITERATOR_PRIMITIVE)
-    goto failed;
-  if (!(i.type == ASN1_INTEGER &&
-        asn1_der_get_uint32(&i, &version) &&
-        version == 0))
-    goto failed;
-  if (!(asn1_der_iterator_next(&i) == ASN1_ITERATOR_CONSTRUCTED &&
-        i.type == ASN1_SEQUENCE &&
-        asn1_der_decode_constructed(&i, &j) == ASN1_ITERATOR_PRIMITIVE &&
-        j.type == ASN1_IDENTIFIER &&
-        j.length == rsaIdentifierLength &&
-        memcmp(j.data, rsaIdentifier, rsaIdentifierLength) == 0))
-    goto failed;
-  if (!(asn1_der_iterator_next(&i) == ASN1_ITERATOR_PRIMITIVE &&
-        i.type == ASN1_OCTETSTRING && i.length))
-    goto failed;
-  loadPKCS1Key(i.data, i.length);
-  return;
-failed:
-  throw std::runtime_error("Failed to import key");
-}
-
 bool SSecurityRSAAES::processMsg()
 {
   switch (state) {
-    case SendPublicKey:
-      loadPrivateKey();
-      writePublicKey();
-      state = ReadPublicKey;
-      /* fall through */
     case ReadPublicKey:
+      writePublicKey();
+      writeRandom();
       if (!readPublicKey())
         return false;
-      writeRandom();
       state = ReadRandom;
       /* fall through */
     case ReadRandom:
       if (!readRandom())
         return false;
       setCipher();
-      writeHash();
-      state = ReadHash;
-      /* fall through */
-    case ReadHash:
       if (!readHash())
         return false;
+      writeHash();
       clearSecrets();
       writeSubtype();
       state = ReadCredentials;
@@ -289,10 +139,6 @@ bool SSecurityRSAAES::processMsg()
     case ReadCredentials:
       if (!readCredentials())
         return false;
-      if (requireUsername)
-        verifyUserPass();
-      else
-        verifyPass();
       return true;
   }
 
@@ -301,12 +147,42 @@ bool SSecurityRSAAES::processMsg()
   return false;
 }
 
+static void random_func(void*, size_t length, uint8_t* dst)
+{
+  rdr::RandomStream rs;
+  if (!rs.hasData(length))
+    throw std::runtime_error("Failed to generate random");
+  rs.readBytes(dst, length);
+}
+
 void SSecurityRSAAES::writePublicKey()
 {
   rdr::OutStream* os = sc->getOutStream();
+  // generate server key
+  rsa_public_key_init(&serverPublicKey);
+  rsa_private_key_init(&serverKey);
+  serverKeyLength = sc->getRSAKeySize();
+  if (serverKeyLength < MinKeyLength)
+    serverKeyLength = MinKeyLength;
+  if (serverKeyLength > MaxKeyLength)
+    serverKeyLength = MaxKeyLength;
+  int rsaKeySize = (serverKeyLength + 7) / 8;
+  // set key size to non-zero to allow clearing the keys when cleanup
+  serverPublicKey.size = rsaKeySize;
+  serverKey.size = rsaKeySize;
+  // set e = 65537
+  mpz_set_ui(serverPublicKey.e, 65537);
+  if (!rsa_generate_keypair(&serverPublicKey, &serverKey,
+                            nullptr, random_func, nullptr, nullptr,
+                            serverKeyLength, 0))
+    throw std::runtime_error("Failed to generate key");
+  serverKeyN = new uint8_t[rsaKeySize];
+  serverKeyE = new uint8_t[rsaKeySize];
+  nettle_mpz_get_str_256(rsaKeySize, serverKeyN, serverPublicKey.n);
+  nettle_mpz_get_str_256(rsaKeySize, serverKeyE, serverPublicKey.e);
   os->writeU32(serverKeyLength);
-  os->writeBytes(serverKeyN, serverKey.size);
-  os->writeBytes(serverKeyE, serverKey.size);
+  os->writeBytes(serverKeyN, rsaKeySize);
+  os->writeBytes(serverKeyE, rsaKeySize);
   os->flush();
 }
 
@@ -335,14 +211,6 @@ bool SSecurityRSAAES::readPublicKey()
   if (!rsa_public_key_prepare(&clientKey))
     throw protocol_error("Client key is invalid");
   return true;
-}
-
-static void random_func(void* ctx, size_t length, uint8_t* dst)
-{
-  rdr::RandomStream* rs = (rdr::RandomStream*)ctx;
-  if (!rs->hasData(length))
-    throw std::runtime_error("Failed to encrypt random");
-  rs->readBytes(dst, length);
 }
 
 void SSecurityRSAAES::writeRandom()
@@ -394,7 +262,7 @@ bool SSecurityRSAAES::readRandom()
   nettle_mpz_init_set_str_256_u(x, size, buffer);
   delete[] buffer;
   if (!rsa_decrypt(&serverKey, &randomSize, clientRandom, x) ||
-    randomSize != (size_t)keySize / 8) {
+      randomSize != (size_t)keySize / 8) {
     mpz_clear(x);
     throw protocol_error("Failed to decrypt client random");
   }
@@ -410,27 +278,27 @@ void SSecurityRSAAES::setCipher()
   if (keySize == 128) {
     struct sha1_ctx ctx;
     sha1_init(&ctx);
-    sha1_update(&ctx, 16, serverRandom);
-    sha1_update(&ctx, 16, clientRandom);
-    sha1_digest(&ctx, 16, key);
-    rais = new rdr::AESInStream(rawis, key, 128);
-    sha1_init(&ctx);
     sha1_update(&ctx, 16, clientRandom);
     sha1_update(&ctx, 16, serverRandom);
-    sha1_digest(&ctx, 16, key);
+    sha1_digest(&ctx, key);
     raos = new rdr::AESOutStream(rawos, key, 128);
+    sha1_init(&ctx);
+    sha1_update(&ctx, 16, serverRandom);
+    sha1_update(&ctx, 16, clientRandom);
+    sha1_digest(&ctx, key);
+    rais = new rdr::AESInStream(rawis, key, 128);
   } else {
     struct sha256_ctx ctx;
     sha256_init(&ctx);
-    sha256_update(&ctx, 32, serverRandom);
-    sha256_update(&ctx, 32, clientRandom);
-    sha256_digest(&ctx, 32, key);
-    rais = new rdr::AESInStream(rawis, key, 256);
-    sha256_init(&ctx);
     sha256_update(&ctx, 32, clientRandom);
     sha256_update(&ctx, 32, serverRandom);
-    sha256_digest(&ctx, 32, key);
+    sha256_digest(&ctx, key);
     raos = new rdr::AESOutStream(rawos, key, 256);
+    sha256_init(&ctx);
+    sha256_update(&ctx, 32, serverRandom);
+    sha256_update(&ctx, 32, clientRandom);
+    sha256_digest(&ctx, key);
+    rais = new rdr::AESInStream(rawis, key, 256);
   }
   if (isAllEncrypted)
     sc->setStreams(rais, raos);
@@ -464,7 +332,7 @@ void SSecurityRSAAES::writeHash()
     sha1_update(&ctx, 4, lenClientKey);
     sha1_update(&ctx, clientKey.size, clientKeyN);
     sha1_update(&ctx, clientKey.size, clientKeyE);
-    sha1_digest(&ctx, hashSize, hash);
+    sha1_digest(&ctx, hash);
   } else {
     hashSize = 32;
     struct sha256_ctx ctx;
@@ -475,7 +343,7 @@ void SSecurityRSAAES::writeHash()
     sha256_update(&ctx, 4, lenClientKey);
     sha256_update(&ctx, clientKey.size, clientKeyN);
     sha256_update(&ctx, clientKey.size, clientKeyE);
-    sha256_digest(&ctx, hashSize, hash);
+    sha256_digest(&ctx, hash);
   }
   raos->writeBytes(hash, hashSize);
   raos->flush();
@@ -512,7 +380,7 @@ bool SSecurityRSAAES::readHash()
     sha1_update(&ctx, 4, lenServerKey);
     sha1_update(&ctx, serverKey.size, serverKeyN);
     sha1_update(&ctx, serverKey.size, serverKeyE);
-    sha1_digest(&ctx, hashSize, realHash);
+    sha1_digest(&ctx, realHash);
   } else {
     struct sha256_ctx ctx;
     sha256_init(&ctx);
@@ -522,7 +390,7 @@ bool SSecurityRSAAES::readHash()
     sha256_update(&ctx, 4, lenServerKey);
     sha256_update(&ctx, serverKey.size, serverKeyN);
     sha256_update(&ctx, serverKey.size, serverKeyE);
-    sha256_digest(&ctx, hashSize, realHash);
+    sha256_digest(&ctx, realHash);
   }
   if (memcmp(hash, realHash, hashSize) != 0)
     throw protocol_error("Hash doesn't match");
@@ -532,8 +400,10 @@ bool SSecurityRSAAES::readHash()
 void SSecurityRSAAES::clearSecrets()
 {
   rsa_private_key_clear(&serverKey);
+  rsa_public_key_clear(&serverPublicKey);
   rsa_public_key_clear(&clientKey);
   serverKey.size = 0;
+  serverPublicKey.size = 0;
   clientKey.size = 0;
   delete[] serverKeyN;
   delete[] serverKeyE;
@@ -549,74 +419,47 @@ void SSecurityRSAAES::clearSecrets()
 
 void SSecurityRSAAES::writeSubtype()
 {
-  if (requireUsername)
-    raos->writeU8(secTypeRA2UserPass);
-  else
-    raos->writeU8(secTypeRA2Pass);
+  raos->writeU8(secType);
   raos->flush();
 }
 
 bool SSecurityRSAAES::readCredentials()
 {
+  std::string username;
+  std::string password;
+
   if (!rais->hasData(1))
     return false;
   rais->setRestorePoint();
-  uint8_t lenUsername = rais->readU8();
-  if (!rais->hasDataOrRestore(lenUsername + 1))
+  uint8_t usernameLen = rais->readU8();
+  if (!rais->hasDataOrRestore(usernameLen + 1))
     return false;
-  rais->readBytes((uint8_t*)username, lenUsername);
-  username[lenUsername] = 0;
-  uint8_t lenPassword = rais->readU8();
-  if (!rais->hasDataOrRestore(lenPassword))
+  if (usernameLen > 0) {
+    char* buf = new char[usernameLen + 1];
+    rais->readBytes((uint8_t*)buf, usernameLen);
+    buf[usernameLen] = '\0';
+    username = buf;
+    delete[] buf;
+  }
+  uint8_t passwordLen = rais->readU8();
+  if (!rais->hasDataOrRestore(passwordLen))
     return false;
-  rais->readBytes((uint8_t*)password, lenPassword);
-  password[lenPassword] = 0;
   rais->clearRestorePoint();
+  if (passwordLen > 0) {
+    char* buf = new char[passwordLen + 1];
+    rais->readBytes((uint8_t*)buf, passwordLen);
+    buf[passwordLen] = '\0';
+    password = buf;
+    delete[] buf;
+  }
+
+  if (secType == secTypeRA2UserPass) {
+    if (!sc->checkUserPasswd(username.c_str(), password.c_str()))
+      throw auth_failed("Username or password incorrect");
+  } else {
+    if (!sc->checkUserPasswd(nullptr, password.c_str()))
+      throw auth_failed("Password incorrect");
+  }
+
   return true;
-}
-
-void SSecurityRSAAES::verifyUserPass()
-{
-#ifndef __APPLE__
-#ifdef WIN32
-  WinPasswdValidator* valid = new WinPasswdValidator();
-#elif !defined(__APPLE__)
-  UnixPasswordValidator *valid = new UnixPasswordValidator();
-#endif
-  std::string msg = "Authentication failed";
-  if (!valid->validate(sc, username, password, msg)) {
-    delete valid;
-    throw auth_error(msg);
-  }
-  delete valid;
-#else
-  throw std::logic_error("No password validator configured");
-#endif
-}
-
-void SSecurityRSAAES::verifyPass()
-{
-  VncAuthPasswdGetter* pg = &SSecurityVncAuth::vncAuthPasswd;
-  std::string passwd, passwdReadOnly;
-  pg->getVncAuthPasswd(&passwd, &passwdReadOnly);
-
-  if (passwd.empty())
-    throw std::runtime_error("No password configured");
-
-  if (password == passwd) {
-    accessRights = AccessDefault;
-    return;
-  }
-
-  if (!passwdReadOnly.empty() && password == passwdReadOnly) {
-    accessRights = AccessView;
-    return;
-  }
-
-  throw auth_error("Authentication failed");
-}
-
-const char* SSecurityRSAAES::getUserName() const
-{
-  return username;
 }
