@@ -62,12 +62,12 @@ bool AESInStream::fillBuffer()
     EAX_SET_NONCE(&eaxCtx128, aes128_encrypt, 16, counter);
     EAX_UPDATE(&eaxCtx128, aes128_encrypt, 2, ad);
     EAX_DECRYPT(&eaxCtx128, aes128_encrypt, length, (uint8_t*)end, data);
-    EAX_DIGEST(&eaxCtx128, aes128_encrypt, 16, macComputed);
+    EAX_DIGEST(&eaxCtx128, aes128_encrypt, macComputed);
   } else {
     EAX_SET_NONCE(&eaxCtx256, aes256_encrypt, 16, counter);
     EAX_UPDATE(&eaxCtx256, aes256_encrypt, 2, ad);
     EAX_DECRYPT(&eaxCtx256, aes256_encrypt, length, (uint8_t*)end, data);
-    EAX_DIGEST(&eaxCtx256, aes256_encrypt, 16, macComputed);
+    EAX_DIGEST(&eaxCtx256, aes256_encrypt, macComputed);
   }
   if (memcmp(mac, macComputed, 16) != 0)
     throw std::runtime_error("AESInStream: Failed to authenticate message");
