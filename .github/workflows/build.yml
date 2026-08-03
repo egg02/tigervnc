@@ -30,8 +30,8 @@ jobs:
           cmake \
             -G "MSYS Makefiles" \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++ -static" \
-            -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++ -static" \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
             -DENABLE_NLS=ON \
             -DENABLE_H264=ON \
             -DENABLE_GNUTLS=ON \
@@ -46,10 +46,13 @@ jobs:
         env:
           MSYS2_PATH_TYPE: inherit
         run: make installer winvnc_installer
+      - name: Copy DLLs to release
+        run: |
+          cp /mingw64/bin/*.dll build/release/ 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         with:
           name: Windows
-          path: build/release/tigervnc*.exe
+          path: build/release/*
       - name: Test
         working-directory: build
         run: ctest --test-dir tests/unit/ --output-junit test-results.xml
