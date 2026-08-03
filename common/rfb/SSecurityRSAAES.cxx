@@ -26,10 +26,12 @@
 #endif
 
 #include <stdlib.h>
+#include <string.h>
 #ifndef WIN32
 #include <unistd.h>
 #endif
 #include <assert.h>
+#include <stdexcept>
 
 #include <nettle/bignum.h>
 #include <nettle/sha1.h>
@@ -40,7 +42,6 @@
 
 #include <rfb/SSecurityRSAAES.h>
 #include <rfb/SConnection.h>
-#include <rfb/Exception.h>
 
 #include <rdr/AESInStream.h>
 #include <rdr/AESOutStream.h>
@@ -161,7 +162,6 @@ void SSecurityRSAAES::writePublicKey()
   rsa_public_key_init(&pubKey);
   rsa_private_key_init(&serverKey);
   
-  // Standard-Schlüssellänge setzen, da SConnection keine eigene Methode hat
   serverKeyLength = 2048; 
   if (serverKeyLength < MinKeyLength)
     serverKeyLength = MinKeyLength;
@@ -201,9 +201,9 @@ bool SSecurityRSAAES::readPublicKey()
   is->setRestorePoint();
   clientKeyLength = is->readU32();
   if (clientKeyLength < MinKeyLength)
-    throw Exception("Client key is too short");
+    throw std::runtime_error("Client key is too short");
   if (clientKeyLength > MaxKeyLength)
-    throw Exception("Client key is too long");
+    throw std::runtime_error("Client key is too long");
   size_t size = (clientKeyLength + 7) / 8;
   if (!is->hasDataOrRestore(size * 2))
     return false;
@@ -216,7 +216,7 @@ bool SSecurityRSAAES::readPublicKey()
   nettle_mpz_set_str_256_u(clientKey.n, size, clientKeyN);
   nettle_mpz_set_str_256_u(clientKey.e, size, clientKeyE);
   if (!rsa_public_key_prepare(&clientKey))
-    throw Exception("Client key is invalid");
+    throw std::runtime_error("Client key is invalid");
   return true;
 }
 
@@ -258,7 +258,7 @@ bool SSecurityRSAAES::readRandom()
   is->setRestorePoint();
   size_t size = is->readU16();
   if (size != serverKey.size)
-    throw Exception("Server key length doesn't match");
+    throw std::runtime_error("Server key length doesn't match");
   if (!is->hasDataOrRestore(size))
     return false;
   is->clearRestorePoint();
@@ -271,7 +271,7 @@ bool SSecurityRSAAES::readRandom()
   if (!rsa_decrypt(&serverKey, &randomSize, clientRandom, x) ||
       randomSize != (size_t)keySize / 8) {
     mpz_clear(x);
-    throw Exception("Failed to decrypt client random");
+    throw std::runtime_error("Failed to decrypt client random");
   }
   mpz_clear(x);
   return true;
@@ -400,7 +400,7 @@ bool SSecurityRSAAES::readHash()
     sha256_digest(&ctx, realHash);
   }
   if (memcmp(hash, realHash, hashSize) != 0)
-    throw Exception("Hash doesn't match");
+    throw std::runtime_error("Hash doesn't match");
   return true;
 }
 
@@ -440,7 +440,8 @@ bool SSecurityRSAAES::readCredentials()
     char* buf = new char[uLen + 1];
     rais->readBytes((uint8_t*)buf, uLen);
     buf[uLen] = '\0';
-    rdr::strlcpy(this->username, buf, sizeof(this->username));
+    strncpy(this->username, buf, sizeof(this->username) - 1);
+    this->username[sizeof(this->username) - 1] = '\0';
     delete[] buf;
   }
   uint8_t pLen = rais->readU8();
@@ -451,7 +452,8 @@ bool SSecurityRSAAES::readCredentials()
     char* buf = new char[pLen + 1];
     rais->readBytes((uint8_t*)buf, pLen);
     buf[pLen] = '\0';
-    rdr::strlcpy(this->password, buf, sizeof(this->password));
+    strncpy(this->password, buf, sizeof(this->password) - 1);
+    this->password[sizeof(this->password) - 1] = '\0';
     delete[] buf;
   }
 
