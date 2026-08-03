@@ -29,9 +29,9 @@ jobs:
         run: |
           cmake \
             -G "MSYS Makefiles" \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
-            -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++ -mwindows" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++ -mwindows" \
             -DENABLE_NLS=ON \
             -DENABLE_H264=ON \
             -DENABLE_GNUTLS=ON \
