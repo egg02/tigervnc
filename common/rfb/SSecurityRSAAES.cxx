@@ -465,8 +465,3 @@ const char* SSecurityRSAAES::getUserName() const
 {
   return username;
 }
-
-const char* SSecurityRSAAES::getPassword() const
-{
-  return password;
-}
