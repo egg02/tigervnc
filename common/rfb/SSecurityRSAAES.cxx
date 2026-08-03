@@ -72,6 +72,8 @@ SSecurityRSAAES::SSecurityRSAAES(SConnection* sc_, uint32_t _secType,
     rais(nullptr), raos(nullptr), rawis(nullptr), rawos(nullptr)
 {
   assert(keySize == 128 || keySize == 256);
+  username[0] = '\0';
+  password[0] = '\0';
 }
 
 SSecurityRSAAES::~SSecurityRSAAES()
@@ -157,7 +159,6 @@ static void random_func(void*, size_t length, uint8_t* dst)
 void SSecurityRSAAES::writePublicKey()
 {
   rdr::OutStream* os = sc->getOutStream();
-  // generate server key
   struct rsa_public_key pubKey;
   rsa_public_key_init(&pubKey);
   rsa_private_key_init(&serverKey);
@@ -458,4 +459,14 @@ bool SSecurityRSAAES::readCredentials()
   }
 
   return true;
+}
+
+const char* SSecurityRSAAES::getUserName() const
+{
+  return username;
+}
+
+const char* SSecurityRSAAES::getPassword() const
+{
+  return password;
 }
