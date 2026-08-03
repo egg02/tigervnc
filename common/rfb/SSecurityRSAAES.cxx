@@ -65,9 +65,9 @@ SSecurityRSAAES::SSecurityRSAAES(SConnection* sc_, uint32_t _secType,
                                  int _keySize, bool _isAllEncrypted)
   : SSecurity(sc_), state(ReadPublicKey),
     keySize(_keySize), isAllEncrypted(_isAllEncrypted), secType(_secType),
-    serverKey(), serverPublicKey(), clientKey(),
-    clientKeyN(nullptr), clientKeyE(nullptr),
+    serverKey(), clientKey(),
     serverKeyN(nullptr), serverKeyE(nullptr),
+    clientKeyN(nullptr), clientKeyE(nullptr),
     rais(nullptr), raos(nullptr), rawis(nullptr), rawos(nullptr)
 {
   assert(keySize == 128 || keySize == 256);
@@ -103,8 +103,6 @@ void SSecurityRSAAES::cleanup()
     delete[] clientKeyE;
   if (serverKey.size)
     rsa_private_key_clear(&serverKey);
-  if (serverPublicKey.size)
-    rsa_public_key_clear(&serverPublicKey);
   if (clientKey.size)
     rsa_public_key_clear(&clientKey);
   if (isAllEncrypted && rawis && rawos)
@@ -159,27 +157,36 @@ void SSecurityRSAAES::writePublicKey()
 {
   rdr::OutStream* os = sc->getOutStream();
   // generate server key
-  rsa_public_key_init(&serverPublicKey);
+  struct rsa_public_key pubKey;
+  rsa_public_key_init(&pubKey);
   rsa_private_key_init(&serverKey);
-  serverKeyLength = sc->getRSAKeySize();
+  
+  // Standard-Schlüssellänge setzen, da SConnection keine eigene Methode hat
+  serverKeyLength = 2048; 
   if (serverKeyLength < MinKeyLength)
     serverKeyLength = MinKeyLength;
   if (serverKeyLength > MaxKeyLength)
     serverKeyLength = MaxKeyLength;
   int rsaKeySize = (serverKeyLength + 7) / 8;
-  // set key size to non-zero to allow clearing the keys when cleanup
-  serverPublicKey.size = rsaKeySize;
+  
+  pubKey.size = rsaKeySize;
   serverKey.size = rsaKeySize;
-  // set e = 65537
-  mpz_set_ui(serverPublicKey.e, 65537);
-  if (!rsa_generate_keypair(&serverPublicKey, &serverKey,
+  
+  mpz_set_ui(pubKey.e, 65537);
+  if (!rsa_generate_keypair(&pubKey, &serverKey,
                             nullptr, random_func, nullptr, nullptr,
-                            serverKeyLength, 0))
+                            serverKeyLength, 0)) {
+    rsa_public_key_clear(&pubKey);
     throw std::runtime_error("Failed to generate key");
+  }
+  
   serverKeyN = new uint8_t[rsaKeySize];
   serverKeyE = new uint8_t[rsaKeySize];
-  nettle_mpz_get_str_256(rsaKeySize, serverKeyN, serverPublicKey.n);
-  nettle_mpz_get_str_256(rsaKeySize, serverKeyE, serverPublicKey.e);
+  nettle_mpz_get_str_256(rsaKeySize, serverKeyN, pubKey.n);
+  nettle_mpz_get_str_256(rsaKeySize, serverKeyE, pubKey.e);
+  
+  rsa_public_key_clear(&pubKey);
+
   os->writeU32(serverKeyLength);
   os->writeBytes(serverKeyN, rsaKeySize);
   os->writeBytes(serverKeyE, rsaKeySize);
@@ -194,9 +201,9 @@ bool SSecurityRSAAES::readPublicKey()
   is->setRestorePoint();
   clientKeyLength = is->readU32();
   if (clientKeyLength < MinKeyLength)
-    throw protocol_error("Client key is too short");
+    throw Exception("Client key is too short");
   if (clientKeyLength > MaxKeyLength)
-    throw protocol_error("Client key is too long");
+    throw Exception("Client key is too long");
   size_t size = (clientKeyLength + 7) / 8;
   if (!is->hasDataOrRestore(size * 2))
     return false;
@@ -209,7 +216,7 @@ bool SSecurityRSAAES::readPublicKey()
   nettle_mpz_set_str_256_u(clientKey.n, size, clientKeyN);
   nettle_mpz_set_str_256_u(clientKey.e, size, clientKeyE);
   if (!rsa_public_key_prepare(&clientKey))
-    throw protocol_error("Client key is invalid");
+    throw Exception("Client key is invalid");
   return true;
 }
 
@@ -251,7 +258,7 @@ bool SSecurityRSAAES::readRandom()
   is->setRestorePoint();
   size_t size = is->readU16();
   if (size != serverKey.size)
-    throw protocol_error("Server key length doesn't match");
+    throw Exception("Server key length doesn't match");
   if (!is->hasDataOrRestore(size))
     return false;
   is->clearRestorePoint();
@@ -264,7 +271,7 @@ bool SSecurityRSAAES::readRandom()
   if (!rsa_decrypt(&serverKey, &randomSize, clientRandom, x) ||
       randomSize != (size_t)keySize / 8) {
     mpz_clear(x);
-    throw protocol_error("Failed to decrypt client random");
+    throw Exception("Failed to decrypt client random");
   }
   mpz_clear(x);
   return true;
@@ -393,17 +400,15 @@ bool SSecurityRSAAES::readHash()
     sha256_digest(&ctx, realHash);
   }
   if (memcmp(hash, realHash, hashSize) != 0)
-    throw protocol_error("Hash doesn't match");
+    throw Exception("Hash doesn't match");
   return true;
 }
 
 void SSecurityRSAAES::clearSecrets()
 {
   rsa_private_key_clear(&serverKey);
-  rsa_public_key_clear(&serverPublicKey);
   rsa_public_key_clear(&clientKey);
   serverKey.size = 0;
-  serverPublicKey.size = 0;
   clientKey.size = 0;
   delete[] serverKeyN;
   delete[] serverKeyE;
@@ -425,40 +430,29 @@ void SSecurityRSAAES::writeSubtype()
 
 bool SSecurityRSAAES::readCredentials()
 {
-  std::string username;
-  std::string password;
-
   if (!rais->hasData(1))
     return false;
   rais->setRestorePoint();
-  uint8_t usernameLen = rais->readU8();
-  if (!rais->hasDataOrRestore(usernameLen + 1))
+  uint8_t uLen = rais->readU8();
+  if (!rais->hasDataOrRestore(uLen + 1))
     return false;
-  if (usernameLen > 0) {
-    char* buf = new char[usernameLen + 1];
-    rais->readBytes((uint8_t*)buf, usernameLen);
-    buf[usernameLen] = '\0';
-    username = buf;
+  if (uLen > 0) {
+    char* buf = new char[uLen + 1];
+    rais->readBytes((uint8_t*)buf, uLen);
+    buf[uLen] = '\0';
+    rdr::strlcpy(this->username, buf, sizeof(this->username));
     delete[] buf;
   }
-  uint8_t passwordLen = rais->readU8();
-  if (!rais->hasDataOrRestore(passwordLen))
+  uint8_t pLen = rais->readU8();
+  if (!rais->hasDataOrRestore(pLen))
     return false;
   rais->clearRestorePoint();
-  if (passwordLen > 0) {
-    char* buf = new char[passwordLen + 1];
-    rais->readBytes((uint8_t*)buf, passwordLen);
-    buf[passwordLen] = '\0';
-    password = buf;
+  if (pLen > 0) {
+    char* buf = new char[pLen + 1];
+    rais->readBytes((uint8_t*)buf, pLen);
+    buf[pLen] = '\0';
+    rdr::strlcpy(this->password, buf, sizeof(this->password));
     delete[] buf;
-  }
-
-  if (secType == secTypeRA2UserPass) {
-    if (!sc->checkUserPasswd(username.c_str(), password.c_str()))
-      throw auth_failed("Username or password incorrect");
-  } else {
-    if (!sc->checkUserPasswd(nullptr, password.c_str()))
-      throw auth_failed("Password incorrect");
   }
 
   return true;
