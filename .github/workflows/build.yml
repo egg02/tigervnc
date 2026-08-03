@@ -30,6 +30,8 @@ jobs:
           cmake \
             -G "MSYS Makefiles" \
             -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++ -static" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++ -static" \
             -DENABLE_NLS=ON \
             -DENABLE_H264=ON \
             -DENABLE_GNUTLS=ON \
@@ -57,4 +59,3 @@ jobs:
         with:
           name: test-results-windows
           path: build/tests/unit/test-results.xml
-
