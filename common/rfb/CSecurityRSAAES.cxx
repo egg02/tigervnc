@@ -228,7 +228,7 @@ void CSecurityRSAAES::verifyServer()
 
   sha1_init(&ctx);
   sha1_update(&ctx, key.length(), key.data());
-  sha1_digest(&ctx, sizeof(f), f);
+  sha1_digest(&ctx, f);
 
   // This is the format used by RealVNC, so use the same so users can
   // compare
@@ -307,24 +307,24 @@ void CSecurityRSAAES::setCipher()
     sha1_init(&ctx);
     sha1_update(&ctx, 16, clientRandom);
     sha1_update(&ctx, 16, serverRandom);
-    sha1_digest(&ctx, 16, key);
+    sha1_digest(&ctx, key);
     rais = new rdr::AESInStream(rawis, key, 128);
     sha1_init(&ctx);
     sha1_update(&ctx, 16, serverRandom);
     sha1_update(&ctx, 16, clientRandom);
-    sha1_digest(&ctx, 16, key);
+    sha1_digest(&ctx, key);
     raos = new rdr::AESOutStream(rawos, key, 128);
   } else {
     struct sha256_ctx ctx;
     sha256_init(&ctx);
     sha256_update(&ctx, 32, clientRandom);
     sha256_update(&ctx, 32, serverRandom);
-    sha256_digest(&ctx, 32, key);
+    sha256_digest(&ctx, key);
     rais = new rdr::AESInStream(rawis, key, 256);
     sha256_init(&ctx);
     sha256_update(&ctx, 32, serverRandom);
     sha256_update(&ctx, 32, clientRandom);
-    sha256_digest(&ctx, 32, key);
+    sha256_digest(&ctx, key);
     raos = new rdr::AESOutStream(rawos, key, 256);
   }
   if (isAllEncrypted)
@@ -359,7 +359,7 @@ void CSecurityRSAAES::writeHash()
     sha1_update(&ctx, 4, lenServerKey);
     sha1_update(&ctx, serverKey.size, serverKeyN);
     sha1_update(&ctx, serverKey.size, serverKeyE);
-    sha1_digest(&ctx, hashSize, hash);
+    sha1_digest(&ctx, hash);
   } else {
     hashSize = 32;
     struct sha256_ctx ctx;
@@ -370,7 +370,7 @@ void CSecurityRSAAES::writeHash()
     sha256_update(&ctx, 4, lenServerKey);
     sha256_update(&ctx, serverKey.size, serverKeyN);
     sha256_update(&ctx, serverKey.size, serverKeyE);
-    sha256_digest(&ctx, hashSize, hash);
+    sha256_digest(&ctx, hash);
   }
   raos->writeBytes(hash, hashSize);
   raos->flush();
@@ -407,7 +407,7 @@ bool CSecurityRSAAES::readHash()
     sha1_update(&ctx, 4, lenClientKey);
     sha1_update(&ctx, clientKey.size, clientKeyN);
     sha1_update(&ctx, clientKey.size, clientKeyE);
-    sha1_digest(&ctx, hashSize, realHash);
+    sha1_digest(&ctx, realHash);
   } else {
     struct sha256_ctx ctx;
     sha256_init(&ctx);
@@ -417,7 +417,7 @@ bool CSecurityRSAAES::readHash()
     sha256_update(&ctx, 4, lenClientKey);
     sha256_update(&ctx, clientKey.size, clientKeyN);
     sha256_update(&ctx, clientKey.size, clientKeyE);
-    sha256_digest(&ctx, hashSize, realHash);
+    sha256_digest(&ctx, realHash);
   }
   if (memcmp(hash, realHash, hashSize) != 0)
     throw protocol_error("Hash doesn't match");
